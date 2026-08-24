@@ -125,8 +125,14 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
 
+                // --- Clear / Reset Task List Button ---
                 Button(action: {
-                    notionService.fetchTasks()
+                    notionService.tasks = []
+                    localTaskManager.tasks = []
+                    selectedTask = nil
+                    selectedLocalTaskId = nil
+                    taskName = ""
+                    isEditingTask = true
                 }) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11, weight: .medium))
@@ -320,22 +326,6 @@ struct ContentView: View {
                 }
             }
             .padding(.vertical, 8)
-            .contentShape(Rectangle())
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        if !isTextFieldFocused {
-                            withAnimation(.easeOut(duration: 0.1)) {
-                                isMouseDown = true
-                            }
-                        }
-                    }
-                    .onEnded { _ in
-                        withAnimation(.easeIn(duration: 0.15)) {
-                            isMouseDown = false
-                        }
-                    }
-            )
             
             Text("\(timeString(from: timeElapsed)) elapsed")
                 .font(.system(size: 11, weight: .medium))
@@ -352,7 +342,25 @@ struct ContentView: View {
         )
         .shadow(color: Color.black.opacity(isMouseDown ? 0.0 : 0.4), radius: 10, x: 0, y: 5)
         .animation(.easeInOut(duration: 0.6), value: currentColor)
-        .background(WindowAccessor())
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { value in
+                    if !isTextFieldFocused {
+                        if abs(value.translation.width) > 1 || abs(value.translation.height) > 1 {
+                            withAnimation(.easeOut(duration: 0.1)) {
+                                isMouseDown = true
+                            }
+                        }
+                    }
+                }
+                .onEnded { _ in
+                    withAnimation(.easeIn(duration: 0.15)) {
+                        isMouseDown = false
+                    }
+                }
+        )
+        .background(WindowAccessor(isMouseDown: $isMouseDown))
         .onAppear {
             notionService.fetchTasks()
         }
@@ -362,7 +370,6 @@ struct ContentView: View {
                 timeRemaining -= 1
                 timeElapsed += 1
                 
-                // Log seconds live to daily history if in focus mode
                 if currentMode == .focus {
                     historyStore.logFocusSession(seconds: 1, isCompletedSession: false)
                 }
@@ -378,7 +385,6 @@ struct ContentView: View {
                 
                 NSSound(named: NSSound.Name("Glass"))?.play()
                 
-                // Mark session completed in history if focus mode finished
                 if currentMode == .focus {
                     historyStore.logFocusSession(seconds: 0, isCompletedSession: true)
                 }
@@ -442,18 +448,78 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Helper to manage window background dragging & transparency natively
 struct WindowAccessor: NSViewRepresentable {
+    @Binding var isMouseDown: Bool
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
+        
         DispatchQueue.main.async {
             if let window = view.window {
                 window.isOpaque = false
                 window.backgroundColor = .clear
                 window.hasShadow = false
+                window.isMovableByWindowBackground = true
             }
         }
+        
+        // Reset transparency on initial click down (do not trigger transparency yet)
+        let downMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+            if let window = view.window, event.window == window {
+                DispatchQueue.main.async {
+                    isMouseDown = false
+                }
+            }
+            return event
+        }
+        
+        // Trigger high transparency ONLY when the mouse actually moves (dragging)
+        let dragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged]) { event in
+            if let window = view.window, event.window == window {
+                DispatchQueue.main.async {
+                    isMouseDown = true
+                }
+            }
+            return event
+        }
+        
+        // Reset transparency when the mouse button is released
+        let upMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { event in
+            if let window = view.window, event.window == window {
+                DispatchQueue.main.async {
+                    isMouseDown = false
+                }
+            }
+            return event
+        }
+        
+        // Global safety net in case the drag ends outside the window bounds
+        let globalUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { _ in
+            DispatchQueue.main.async {
+                isMouseDown = false
+            }
+        }
+        
+        context.coordinator.monitors = [downMonitor, dragMonitor, upMonitor, globalUpMonitor]
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    class Coordinator {
+        var monitors: [Any?] = []
+        
+        deinit {
+            for monitor in monitors {
+                if let monitor = monitor {
+                    NSEvent.removeMonitor(monitor)
+                }
+            }
+        }
+    }
 }
